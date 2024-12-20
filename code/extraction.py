@@ -15,8 +15,7 @@ import numpy as np
 import skimage
 import sparse
 import suite2p
-from aind_data_schema.core.processing import (DataProcess, PipelineProcess,
-                                              Processing, ProcessName)
+from aind_data_schema.core.processing import DataProcess, ProcessName
 from aind_ophys_utils.array_utils import downsample_array
 from aind_ophys_utils.summary_images import max_corr_image
 
@@ -53,9 +52,7 @@ def get_r_from_min_mi(raw_trace, neuropil_trace, resolution=0.01, r_test_range=[
     raw_trace[np.isnan(raw_trace)] = 0
     for r_i, r_temp in enumerate(r_iters):
         Fc = raw_trace - r_temp * neuropil_trace
-        mi_iters[r_i] = skimage.metrics.normalized_mutual_information(
-            Fc, neuropil_trace
-        )
+        mi_iters[r_i] = skimage.metrics.normalized_mutual_information(Fc, neuropil_trace)
     min_ind = np.argmin(mi_iters)
     r_best = r_iters[min_ind]
     return r_best, mi_iters, r_iters
@@ -119,51 +116,42 @@ def make_output_directory(output_dir: Path, experiment_id: str) -> str:
     return output_dir
 
 
-def write_output_metadata(
+def write_data_process(
     metadata: dict,
-    process_json_dir: str,
-    process_name: str,
     input_fp: Union[str, Path],
     output_fp: Union[str, Path],
-    start_date_time: dt,
+    start_time: dt,
+    end_time: dt,
 ) -> None:
     """Writes output metadata to plane processing.json
 
     Parameters
     ----------
     metadata: dict
-        parameters from suite2p cellpose segmentation
-    input_fp: str
-        path to data input
+        parameters from suite2p motion correction
+    raw_movie: str
+        path to raw movies
     output_fp: str
-        path to data output
+        path to motion corrected movies
     """
-    with open(Path(process_json_dir) / "processing.json", "r") as f:
-        proc_data = json.load(f)
-    processing = Processing(
-        processing_pipeline=PipelineProcess(
-            processor_full_name="Multplane Ophys Processing Pipeline",
-            pipeline_url=os.getenv("PIPELINE_URL", ""),
-            pipeline_version=os.getenv("PIPELINE_VERSION", ""),
-            data_processes=[
-                DataProcess(
-                    name=process_name,
-                    software_version=os.getenv("VERSION", ""),
-                    start_date_time=start_date_time,
-                    end_date_time=dt.now(),
-                    input_location=str(input_fp),
-                    output_location=str(output_fp),
-                    code_url=(os.getenv("EXTRACTION_URL")),
-                    parameters=metadata,
-                )
-            ],
-        )
+    if isinstance(input_fp, Path):
+        input_fp = str(input_fp)
+    if isinstance(output_fp, Path):
+        output_fp = str(output_fp)
+    data_proc = DataProcess(
+        name=ProcessName.VIDEO_ROI_TIMESERIES_EXTRACTION,
+        software_version=os.getenv("VERSION", ""),
+        start_date_time=start_time.isoformat(),
+        end_date_time=end_time.isoformat(),
+        input_location=input_fp,
+        output_location=output_fp,
+        code_url=(os.getenv("REPO_URL", "")),
+        parameters=metadata,
     )
-    prev_processing = Processing(**proc_data)
-    prev_processing.processing_pipeline.data_processes.append(
-        processing.processing_pipeline.data_processes[0]
-    )
-    prev_processing.write_standard_file(output_directory=Path(output_fp).parent)
+    if isinstance(output_fp, str):
+        output_dir = Path(output_fp).parent
+    with open(output_dir / "data_process.json", "w") as f:
+        json.dump(json.loads(data_proc.model_dump_json()), f, indent=4)
 
 
 def create_virtual_dataset(
@@ -236,7 +224,6 @@ def bergamo_segmentation(motion_corr_fp: Path, session: dict, temp_dir: Path) ->
     )
 
 
-
 def get_metdata(input_dir: Path) -> Tuple[dict, dict, dict]:
     """Get the session and data description metadata from the input directory
 
@@ -252,25 +239,24 @@ def get_metdata(input_dir: Path) -> Tuple[dict, dict, dict]:
     data_description: dict
         data description metadata
     processing: dict
-
+        processing metadata
+    subject: dict
+        subject metadata
     """
-    try:
-        session_fp = next(input_dir.rglob("session.json"))
-        with open(session_fp, "r") as j:
-            session = json.load(j)
-    except StopIteration:
-        session = None
-    try:
-        data_des_fp = next(input_dir.rglob("data_description.json"))
-        with open(data_des_fp, "r") as j:
-            data_description = json.load(j)
-    except StopIteration:
-        data_description = None
+    session_fp = next(input_dir.rglob("session.json"))
+    with open(session_fp, "r") as j:
+        session = json.load(j)
+    data_des_fp = next(input_dir.rglob("data_description.json"))
+    with open(data_des_fp, "r") as j:
+        data_description = json.load(j)
     process_fp = next(input_dir.rglob("*/processing.json"))
     with open(process_fp, "r") as j:
         processing = json.load(j)
+    session_fp = next(input_dir.rglob("subject.json"))
+    with open(subject_fp, "r") as j:
+        subject = json.load(j)
 
-    return session, data_description, processing
+    return session, data_description, processing, subject
 
 
 def get_frame_rate(processing: dict) -> float:
@@ -374,9 +360,7 @@ def get_contours(rois, thr=0.2, thr_method="max"):
             if thr_method != "max":
                 warn("Unknown threshold method. Choosing max")
             Bvec = np.zeros(d)
-            Bvec[A.indices[A.indptr[i] : A.indptr[i + 1]]] = (
-                patch_data / patch_data.max()
-            )
+            Bvec[A.indices[A.indptr[i] : A.indptr[i + 1]]] = patch_data / patch_data.max()
 
         Bmat = np.reshape(Bvec, dims, order="F")
         pars["coordinates"] = []
@@ -563,9 +547,7 @@ def contour_video(
 if __name__ == "__main__":
     start_time = dt.now()
     # Set the log level and name the logger
-    logger = logging.getLogger(
-        "Source extraction using Suite2p with or without Cellpose"
-    )
+    logger = logging.getLogger("Source extraction using Suite2p with or without Cellpose")
     logger.setLevel(logging.INFO)
 
     # Parse command-line arguments
@@ -648,7 +630,12 @@ if __name__ == "__main__":
     output_dir = Path(args.output_dir).resolve()
     input_dir = Path(args.input_dir).resolve()
     tmp_dir = Path(args.tmp_dir).resolve()
-    session, data_description, processing = get_metdata(input_dir)
+    session, data_description, processing, subject = get_metdata(input_dir)
+    subject_id = subject.get("subject_id", "")
+    name = data_description.get("name", "")
+    setup_logging(
+        "aind-ophys-extraction-suite2p", mouse_id=subject_id, session_name=name
+    )
     if next(input_dir.rglob("*decrosstalk.h5"), ""):
         input_fn = next(input_dir.rglob("*decrosstalk.h5"))
     else:
@@ -662,7 +649,7 @@ if __name__ == "__main__":
         unique_id = motion_corrected_fn.parent.parent.name
     else:
         unique_id = "_".join(str(data_description["name"]).split("_")[-3:])
-        
+
     frame_rate = get_frame_rate(processing)
 
     output_dir = make_output_directory(output_dir, unique_id)
@@ -736,9 +723,7 @@ if __name__ == "__main__":
             traces_corrected = traces_roi - suite2p_args["neucoeff"] * traces_neuropil
             r_values = suite2p_args["neucoeff"] * np.ones(traces_roi.shape[0])
         else:
-            traces_corrected, r_values, raw_r = get_FC_from_r(
-                traces_roi, traces_neuropil
-            )
+            traces_corrected, r_values, raw_r = get_FC_from_r(traces_roi, traces_neuropil)
         # convert ROIs to sparse COO 3D-tensor a la https://sparse.pydata.org/en/stable/construct.html
         data = []
         coords = []
@@ -784,9 +769,7 @@ if __name__ == "__main__":
     cellpose_path = str(next(Path(args.tmp_dir).rglob("cellpose.npz"), ""))
     ops_path = str(next(Path(args.tmp_dir).rglob("ops.npy")))
     # write output files
-    with (
-        h5py.File(output_dir / f"{unique_id}_extraction.h5", "w") as f
-    ):
+    with h5py.File(output_dir / f"{unique_id}_extraction.h5", "w") as f:
         # traces
         f.create_dataset("traces/corrected", data=traces_corrected, compression="gzip")
         f.create_dataset("traces/neuropil", data=traces_neuropil, compression="gzip")
@@ -809,9 +792,7 @@ if __name__ == "__main__":
         f.create_dataset("rois/data", data=data, compression="gzip")
         shape = np.array([len(traces_roi), *dims], dtype=np.int16)
         f.create_dataset("rois/shape", data=shape)  # neurons x height x width
-        f.create_dataset(
-            "rois/neuropil_coords", data=neuropil_coords, compression="gzip"
-        )
+        f.create_dataset("rois/neuropil_coords", data=neuropil_coords, compression="gzip")
         # cellpose
         if cellpose_path:
             with np.load(cellpose_path) as cp:
@@ -827,13 +808,13 @@ if __name__ == "__main__":
         f.create_dataset(f"meanImg", data=ops["meanImg"], compression="gzip")
         f.create_dataset(f"maxImg", data=ops["max_proj"], compression="gzip")
 
-    write_output_metadata(
+    write_data_process(
         vars(args),
         str(parent_directory),
-        ProcessName.VIDEO_ROI_TIMESERIES_EXTRACTION,
         input_fn,
         output_dir / "extraction.h5",
         start_time,
+        dt.now(),
     )
 
     # plot contours of detected ROIs over a selection of summary images
@@ -857,11 +838,19 @@ if __name__ == "__main__":
             fontsize=min(24, 2.4 + 2 * x_size),
         )
     plt.tight_layout(pad=0.1)
-    plt.savefig(output_dir / f"{unique_id}_detected_ROIs.png", bbox_inches="tight", pad_inches=0.02)
+    plt.savefig(
+        output_dir / f"{unique_id}_detected_ROIs.png",
+        bbox_inches="tight",
+        pad_inches=0.02,
+    )
     for i in (0, 1, 2):
         for k in range(rois.shape[0]):
-            ax[i].text(*cm[k], str(k), color="orange", fontsize=8*lw)
-    plt.savefig(output_dir / f"{unique_id}_detected_ROIs_withIDs.png", bbox_inches="tight", pad_inches=0.02)
+            ax[i].text(*cm[k], str(k), color="orange", fontsize=8 * lw)
+    plt.savefig(
+        output_dir / f"{unique_id}_detected_ROIs_withIDs.png",
+        bbox_inches="tight",
+        pad_inches=0.02,
+    )
 
     if args.contour_video:
         with h5py.File(str(motion_corrected_fn), "r") as f:
